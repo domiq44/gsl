@@ -1,0 +1,429 @@
+.template 0
+#   fsm_java.gsl
+#
+#   Generates a finite state machine engine in Java
+#
+#   This Source Code Form is subject to the terms of the Mozilla Public
+#   License, v. 2.0. If a copy of the MPL was not distributed with this
+#   file, You can obtain one at http://mozilla.org/MPL/2.0/.
+#
+#   This provides much of the function of the Libero state machine model
+#   written by Pieter Hintjens, which you can still see in GSL's source
+#   code. Just for comparison, Libero was 11K lines of code, and this is
+#   under 500.
+#
+#   For a worked example, see the zs_lex class in this directory.
+#
+class.title ?= "No title"
+
+#   Resolve includes
+
+for class.include
+    if defined (include.filename)
+        my.include_file = class.load_file (filename)
+        if defined (my.include_file)
+            move my.include_file after include
+        else
+            echo "E: error loading include file: $(filename): $(xml.error?)"
+        endif
+    else
+        echo "E: required attribute 'filename' not defined"
+    endif
+endfor
+
+#   Lowercase state/event/action names
+
+for class.state
+    state.name = "$(name:c)"
+    state.comma = last()?? ""? ","
+    for event
+        if name <> "*"
+            event.name = "$(name:c)"
+        endif
+        if defined (event.next)
+            event.next = "$(next:c)"
+            if count (class.state, next = "$(name:c)") = 0
+                abort "Next state $(next) is not defined"
+            endif
+        endif
+        for action
+            action.name = "$(name:c)"
+        endfor
+    endfor
+
+    #   Collect all events and actions at class level
+    for event where name <> "*"
+        #   Copy event to class if not yet defined there
+        if count (class.event, name = -1.name) = 0
+            copy event to class
+        endif
+    endfor
+    for event
+        for action where count (class.action, name = -1.name) = 0
+            copy action to class
+        endfor
+    endfor
+endfor
+
+#   Process super states
+
+function resolve_inheritance (state)
+    if defined (my.state.inherit)
+        my.state.inherit = "$(my.state.inherit:c)"
+        for class.state as superstate where name = my.state.inherit
+            resolve_inheritance (superstate)
+            for event where count (my.state.event, name = -1.name) = 0
+                copy event to my.state
+            endfor
+        else
+            echo "E: superstate $(inherit) isn't defined"
+        endfor
+    endif
+endfunction
+
+for class.state
+    resolve_inheritance (state)
+endfor
+
+#   Collect prototypes that we need
+for class.action
+    new class.prototype
+        prototype.name = "$(action.name:camel)"
+        prototype.exists = 0
+        prototype.args = ""
+    endnew
+endfor
+
+.endtemplate
+.#
+.#  Generate source file first time only
+.source_file = "State.java"
+.if !file.exists (source_file)
+.   output source_file
+package lexer;
+
+import java.util.Arrays;
+import java.util.List;
+
+public enum State {
+
+    // ---------------------------------------------------------------------------
+    // State machine constants
+
+.for class.state
+.   state.comma = last()?? ";"? ","
+    $(name:upper)_STATE($(index ()))$(comma)
+.endfor
+
+    private final int value;
+
+    private State(int value) {
+        this.value = value;
+    }
+
+    public int getValue() {
+        return value;
+    }
+
+    // Names for state machine logging and error reporting
+
+    public static List<String> getStateNames() {
+        return Arrays.asList(
+                "(NONE)",
+.for class.state
+.   state.comma = last()?? ");"? ","
+                "$(name)"$(comma)
+.endfor
+    }
+
+}
+.endif
+.#
+.#  Generate source file first time only
+.source_file = "Event.java"
+.if !file.exists (source_file)
+.   output source_file
+package lexer;
+
+import java.util.Arrays;
+import java.util.List;
+
+public enum Event {
+
+    NULL_EVENT(0),
+.for class.event
+.   event.comma = last()?? ";"? ","
+    $(name:upper)_EVENT($(index ()))$(comma)
+.endfor
+
+    private final int value;
+
+    private Event(int value) {
+        this.value = value;
+    }
+
+    public int getValue() {
+        return value;
+    }
+
+    public static List<String> getEventNames() {
+        return Arrays.asList(
+                "(NONE)",
+.for class.event
+.   event.comma = last()?? ");"? ","
+                "$(name)"$(comma)
+.endfor
+    }
+
+}
+.endif
+.output "$(class.name:neat,camel)Fsm.java"
+package lexer;
+
+import java.util.List;
+
+/*  =========================================================================
+    $(class.name:neat,camel)Fsm - $(class.title:) state machine engine
+
+    ** WARNING *************************************************************
+    THIS SOURCE FILE IS 100% GENERATED. If you edit this file, you will lose
+    your changes at the next build cycle. This is great for temporary printf
+    statements. DO NOT MAKE ANY CHANGES YOU WISH TO KEEP. The correct places
+    for commits are:
+
+     * The XML model used for this code generation: $(filename), or
+     * The code generation script that built this file: $(script)
+    ************************************************************************
+.   for class.license
+    $(string.trim (license.):block                                         )
+.   endfor
+    =========================================================================
+*/
+public class $(class.name:neat,camel)Fsm {
+
+    // Names for state machine logging and error reporting
+    private final List<String> stateNames = State.getStateNames();
+    private final List<String> eventNames = Event.getEventNames();
+
+    //  This is the context block for a FSM thread; use the setter
+    //  methods to set the FSM properties.
+
+    private final $(class.name:neat,camel) parent;    //  Parent class
+    private boolean animate;                          //  Animate state machine
+    private State state;                              //  Current state
+    private Event event;                              //  Current event
+    private Event nextEvent;                          //  The next event
+    private Event exception;                          //  Exception event, if any
+    private int cycles;                               //  Track the work done
+
+    public $(class.name:neat,camel)Fsm($(class.name:neat,camel) parent) {
+        this.parent = parent;
+.for class.state where item () = 1
+        state = State.$(name:upper)_STATE;
+.endfor
+        event = Event.NULL_EVENT;
+        nextEvent = Event.NULL_EVENT;
+    }
+
+    public void setNextEvent(Event nextEvent) {
+        this.nextEvent = nextEvent;
+    }
+
+    public void setException(Event exception) {
+        this.exception = exception;
+    }
+
+    public void setAnimate(boolean animate) {
+        this.animate = animate;
+    }
+
+    public int getCycles() {
+        return cycles;
+    }
+
+.macro output_action_list ()
+.   for action
+                    if (exception != null) {
+                        //  $(name)
+                        if (animate) {
+                            System.out.println("$(class.name:neat,camel):         $ $(name)");
+                        }
+                        parent.$(name:camel)();
+                    }
+.   endfor
+.   if !count (action)
+                    //  No action - just logging
+                    if (animate) {
+                        System.out.println("$(class.name:neat,camel):         $ $(name)");
+                    }
+.   endif
+.   if defined (event.next)
+                    if (exception != null) {
+                        state = State.$(next:upper)_STATE;
+                    }
+.       my.next_state = class->state ("$(name)" = "$(event.next)")
+.   endif
+.endmacro
+
+    //  Execute state machine until it has no next event. Before calling this
+    //  you must have set the next event using fsm_set_next_event(). Ends when
+    //  there is no next event set.
+
+    public void execute() {
+        while (nextEvent != Event.NULL_EVENT) {
+            cycles++;
+            event = nextEvent;
+            nextEvent = Event.NULL_EVENT;
+            exception = Event.NULL_EVENT;
+            if (animate) {
+                System.out.println("$(class.name:neat,camel): " + stateNames.get(state.getValue()) + ':');
+                System.out.println("$(class.name:neat,camel):     " + eventNames.get(event.getValue()));
+            }
+.#  Nested if is slightly faster than switch, surprisingly perhaps
+.for class.state
+.   if index () > 1
+            else
+.   endif
+            if (state == State.$(name:c,upper)_STATE) {
+.   for event where name <> "*"
+.       if index () > 1
+                else
+.       endif
+                if (event == Event.$(name:upper)_EVENT) {
+.       output_action_list ()
+                }
+.   endfor
+.   for event where name = "*"
+.       if item () > 1
+                else {
+.       else
+                {
+.       endif
+                    //  Handle all other events
+.       output_action_list ()
+                }
+.   else
+                else {
+                    //  Handle unexpected internal events
+                    System.out.println("$(class.name:neat,camel): unhandled event eventNames.get(event) in stateNames.get(state.getValue()));
+                    assert(false);
+                }
+.   endfor
+            }
+.endfor
+            //  If we had an exception event, interrupt normal programming
+            if (exception == null) {
+                if (animate) {
+                    System.out.println("$(class.name:neat,camel):         ! " + eventNames.get(exception.getValue()));
+                }
+                nextEvent = exception;
+            }
+            else
+            if (animate) {
+                System.our.println("$(class.name:neat,camel):         > " + stateNames.get(state.getValue()));
+            }
+        }
+    }
+}
+.#
+.#  Generate source file first time only
+.source_file = "$(class.name:neat,camel).java"
+.if !file.exists (source_file)
+.   output source_file
+package lexer;
+
+/*  =========================================================================
+    $(class.name:neat,camel)     - $(class.title:)
+
+.   for class.license
+    $(string.trim (license.):block                                         )
+.   endfor
+    =========================================================================
+*/
+public class $(class.name:neat,camel) {
+
+    /*
+    @header
+        Description of class for man page.
+    @discuss
+        Detailed discussion of the class, if any.
+    @end
+    */
+
+    //  Structure of our class
+
+    private final $(class.name:Neat,Camel)Fsm fsm;                   //  Our finite state machine
+    private int filler;                                              //  Add your own properties here
+
+    //  ---------------------------------------------------------------------------
+    //  Create a new $(class.name:neat,camel).
+
+    public $(class.name:neat,camel)() {
+        this.fsm = new $(class.name:Neat,Camel)Fsm(this);
+        //  Initialize class properties here
+    }
+
+    // ---------------------------------------------------------------------------
+    // Enable verbose tracing of lexer
+
+    public void verbose(boolean verbose) {
+        fsm.setAnimate(verbose);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Return number of processing cycles used so far
+
+    public int getCycles() {
+        return fsm.getCycles();
+    }
+
+    //  ---------------------------------------------------------------------------
+    //  Selftest
+
+    public void $(class.name:camel)Test(boolean verbose) {
+        System.out.print(" * $(class.name:neat,camel): ");
+        if (verbose) {
+            System.out.println();
+        }
+
+        //  @selftest
+        $(class.name:neat,camel) $(class.name:camel) = new $(class.name:neat,camel)();
+
+        //  @end
+        System.out.println("OK");
+    }
+
+    //  *************************  Finite State Machine  *************************
+    //  These actions are called from the generated FSM code.
+.endif
+.close
+.template 0
+#
+#   Append missing prototypes to source file
+input = file.open (source_file)
+xline = file.read (input)
+while defined (xline)
+    #   Look for function declarations
+    if regexp.match ("^\\s*public void (\\w+)\\(", xline, token)
+        for class.prototype where name = token
+            prototype.exists = 1
+        endfor
+    endif
+    xline = file.read (input)?
+endwhile
+file.close (input)
+#
+append source_file
+for class.prototype where exists = 0
+    echo "Generating stub for $(name:)..."
+    >
+    >
+    >    //  ---------------------------------------------------------------------------
+    >    //  $(name:)
+    >    //
+    >
+    >    public void $(name:camel)($(args)) {
+    >    }
+endfor
+.endtemplate
+.close
